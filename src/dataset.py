@@ -38,7 +38,7 @@ class TrainDataset(Dataset):
         self.n_items: int = n_items
         self.user_pos_items: Dict[int, Set[int]] = user_pos_items
         self.num_negatives: int = num_negatives
-	    self.seed: int = seed
+		self.seed: int = seed
         self._data: List[Tuple[int, int, float]] = self._generate(interactions)
         logger.info(
             "TrainDataset: %d samples (%d positives × %d negatives each)",
