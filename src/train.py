@@ -1,170 +1,141 @@
-"""Training loop with BCE loss, Adam optimisation, and early stopping."""
+"""Training loop built on Keras's `model.fit()`, with ranking-based validation and early stopping."""
 
 import logging
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
-import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader, Dataset
-from tqdm import tqdm
+import tensorflow as tf
 
 from .evaluate import RankingEvaluator
 
 logger = logging.getLogger(__name__)
 
 
-class RecommenderTrainer:
-    """Encapsulates the full training loop for implicit-feedback recommendation models.
+class _RankingEvalCallback(tf.keras.callbacks.Callback):
+    """Runs HR@K/NDCG@K validation at the end of every epoch and injects results into `logs`.
 
-    Trains with Binary Cross-Entropy loss and Adam optimisation.  At the end of
-    every epoch the model is evaluated on the validation set using HR@K; the best
-    checkpoint is retained.  Training halts when validation HR@K has not improved
-    for ``patience`` consecutive epochs.
+    Keras's built-in metrics only cover things computable from a per-batch
+    loss/metric function (e.g. BCE), not a whole-dataset ranking pass over
+    positive+negative candidates. This callback bridges that gap by running
+    `RankingEvaluator` at epoch end and writing `val_hr`/`val_ndcg` into the
+    shared `logs` dict, so downstream callbacks (`EarlyStopping`, `History`)
+    can see and act on them as if they were native Keras metrics.
+
+    Must be listed *before* `EarlyStopping` in `model.fit(callbacks=[...])`
+    — Keras calls each callback's `on_epoch_end` in list order against the
+    same `logs` object, so this callback's writes must happen first.
 
     Args:
-        model: An ``nn.Module`` with a ``forward(user, item) → Tensor`` signature.
-        device: Torch device string (``"cpu"``, ``"cuda"``, or ``"mps"``).
+        evaluator: A configured `RankingEvaluator`.
+        val_dataset: `EvalDataset` (TF version, from `data.py`) for validation scoring.
+    """
+
+    def __init__(self, evaluator: RankingEvaluator, val_dataset) -> None:
+        super().__init__()
+        self._evaluator = evaluator
+        self._val_dataset = val_dataset
+
+    def on_epoch_end(self, epoch: int, logs: Optional[Dict] = None) -> None:
+        """Compute validation ranking metrics and write them into `logs`.
+
+        Args:
+            epoch: Current epoch index (0-based, supplied by Keras).
+            logs: Mutable dict of epoch metrics shared across callbacks;
+                mutated in place so later callbacks see `val_hr`/`val_ndcg`.
+        """
+        logs = {} if logs is None else logs
+        metrics = self._evaluator.evaluate(self.model, self._val_dataset)
+        hr_key = f"hr@{self._evaluator.k}"
+        ndcg_key = f"ndcg@{self._evaluator.k}"
+        logs["val_hr"] = metrics[hr_key]
+        logs["val_ndcg"] = metrics[ndcg_key]
+        logger.info(
+            "Epoch %3d | Val %s=%.4f | Val %s=%.4f",
+            epoch + 1, hr_key, metrics[hr_key], ndcg_key, metrics[ndcg_key],
+        )
+
+
+class RecommenderTrainer:
+    """Thin wrapper around `model.compile()` / `model.fit()` for implicit-feedback models.
+
+    Trains with Binary Cross-Entropy loss and Adam optimisation using Keras's
+    built-in training loop. Validation HR@K/NDCG@K is computed each epoch by
+    `_RankingEvalCallback`; early stopping and best-weight restoration are
+    handled by `tf.keras.callbacks.EarlyStopping` (replaces the manual
+    state-dict cloning from the PyTorch version).
+
+    Args:
+        model: A `tf.keras.Model` with a `call((user, item), training) -> Tensor` signature.
         epochs: Maximum number of training epochs.
         lr: Adam learning rate.
-        batch_size: Mini-batch size for the training DataLoader.
+        batch_size: Mini-batch size for the training dataset.
         patience: Early-stopping tolerance in validation epochs.
-        eval_k: Cutoff rank K passed to ``RankingEvaluator``.
-        eval_batch_size: Users scored per forward pass during validation/eval.
-        num_workers: Worker processes for the training DataLoader.
+        eval_k: Cutoff rank K passed to `RankingEvaluator`.
+        eval_batch_size: Users scored per forward pass during validation.
     """
 
     def __init__(
         self,
-        model: nn.Module,
-        device: str,
+        model: tf.keras.Model,
         epochs: int = 30,
         lr: float = 1e-3,
         batch_size: int = 1024,
         patience: int = 5,
         eval_k: int = 10,
         eval_batch_size: int = 256,
-        num_workers: int = 0,
     ) -> None:
-        self.model: nn.Module = model.to(device)
-        self.device: str = device
+        self.model: tf.keras.Model = model
         self.epochs: int = epochs
-        self.lr: float = lr
         self.batch_size: int = batch_size
         self.patience: int = patience
-        self.num_workers: int = num_workers
         self._evaluator = RankingEvaluator(k=eval_k, eval_batch_size=eval_batch_size)
-        self._optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-        self._criterion = nn.BCELoss()
+        self.model.compile(
+            optimizer=tf.keras.optimizers.Adam(learning_rate=lr),
+            loss=tf.keras.losses.BinaryCrossentropy(),
+        )
 
-    def fit(
-        self,
-        train_dataset: Dataset,
-        val_dataset: Dataset,
-    ) -> Tuple[nn.Module, Dict[str, List[float]]]:
-        """Run the training loop and return the best checkpoint plus history.
+    def fit(self, train_dataset, val_dataset) -> Tuple[tf.keras.Model, Dict[str, List[float]]]:
+        """Run `model.fit()` with ranking-eval and early-stopping callbacks.
 
         Args:
-            train_dataset: ``TrainDataset`` yielding (user, item, label) triples.
-            val_dataset: ``EvalDataset`` used for validation HR@K scoring.
+            train_dataset: `TrainDataset` (TF version, from `data.py`);
+                `.as_tf_dataset()` is called internally with `self.batch_size`.
+            val_dataset: `EvalDataset` (TF version, from `data.py`) used for
+                validation ranking scoring.
 
         Returns:
             Tuple of (best_model, history_dict) where history_dict contains
-            lists ``"train_loss"``, ``"val_hr"``, and ``"val_ndcg"``.
+            lists "train_loss", "val_hr", and "val_ndcg" — best weights
+            (by val_hr) are already restored onto `best_model` via
+            `EarlyStopping(restore_best_weights=True)`.
 
         Raises:
-            RuntimeError: If a training step raises an unrecoverable error.
+            RuntimeError: If `model.fit()` raises an unrecoverable error.
         """
-        loader = DataLoader(
-            train_dataset,
-            batch_size=self.batch_size,
-            shuffle=True,
-            num_workers=self.num_workers,
+        train_ds = train_dataset.as_tf_dataset(batch_size=self.batch_size, shuffle=True)
+
+        eval_cb = _RankingEvalCallback(self._evaluator, val_dataset)
+        early_stop_cb = tf.keras.callbacks.EarlyStopping(
+            monitor="val_hr",
+            mode="max",
+            patience=self.patience,
+            restore_best_weights=True,
+            verbose=1,
         )
 
-        best_hr: float = -1.0
-        best_state: Dict = {}
-        no_improve: int = 0
-        history: Dict[str, List[float]] = {
-            "train_loss": [],
-            "val_hr": [],
-            "val_ndcg": [],
-        }
-
-        hr_key = f"hr@{self._evaluator.k}"
-        ndcg_key = f"ndcg@{self._evaluator.k}"
-
-        for epoch in range(1, self.epochs + 1):
-            avg_loss = self._train_epoch(loader, epoch)
-            val_metrics = self._evaluator.evaluate(self.model, val_dataset, self.device)
-
-            history["train_loss"].append(avg_loss)
-            history["val_hr"].append(val_metrics[hr_key])
-            history["val_ndcg"].append(val_metrics[ndcg_key])
-
-            logger.info(
-                "Epoch %3d/%d | Loss=%.4f | Val %s=%.4f | Val %s=%.4f",
-                epoch,
-                self.epochs,
-                avg_loss,
-                hr_key,
-                val_metrics[hr_key],
-                ndcg_key,
-                val_metrics[ndcg_key],
-            )
-
-            if val_metrics[hr_key] > best_hr:
-                best_hr = val_metrics[hr_key]
-                best_state = {k: v.clone() for k, v in self.model.state_dict().items()}
-                no_improve = 0
-            else:
-                no_improve += 1
-                if no_improve >= self.patience:
-                    logger.info(
-                        "Early stopping at epoch %d (best %s=%.4f)",
-                        epoch,
-                        hr_key,
-                        best_hr,
-                    )
-                    break
-
-        self.model.load_state_dict(best_state)
-        return self.model, history
-
-    def _train_epoch(self, loader: DataLoader, epoch: int) -> float:
-        """Execute one training epoch and return the mean BCE loss.
-
-        Args:
-            loader: DataLoader yielding (user, item, label) batches.
-            epoch: Current epoch number (used for tqdm label only).
-
-        Returns:
-            Mean per-sample BCE loss over the full epoch.
-
-        Raises:
-            RuntimeError: If a forward or backward pass raises an error.
-        """
-        self.model.train()
-        total_loss: float = 0.0
-        n_samples: int = 0
-
         try:
-            for user, item, label in tqdm(
-                loader, desc=f"Epoch {epoch:3d}/{self.epochs}", leave=False
-            ):
-                user = user.to(self.device)
-                item = item.to(self.device)
-                label = label.to(self.device)
-
-                self._optimizer.zero_grad()
-                pred: torch.Tensor = self.model(user, item)
-                loss: torch.Tensor = self._criterion(pred, label)
-                loss.backward()
-                self._optimizer.step()
-
-                total_loss += loss.item() * len(user)
-                n_samples += len(user)
+            fit_result = self.model.fit(
+                train_ds,
+                epochs=self.epochs,
+                callbacks=[eval_cb, early_stop_cb],
+                verbose=1,
+            )
         except Exception as exc:
-            logger.error("Training step failed at epoch %d: %s", epoch, exc)
-            raise RuntimeError(f"Training aborted at epoch {epoch}") from exc
+            logger.error("Training failed: %s", exc)
+            raise RuntimeError("Training aborted") from exc
 
-        return total_loss / max(n_samples, 1)
+        history: Dict[str, List[float]] = {
+            "train_loss": fit_result.history.get("loss", []),
+            "val_hr": fit_result.history.get("val_hr", []),
+            "val_ndcg": fit_result.history.get("val_ndcg", []),
+        }
+        return self.model, history
