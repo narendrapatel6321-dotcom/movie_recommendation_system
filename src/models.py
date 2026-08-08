@@ -1,6 +1,6 @@
 """Matrix Factorization, MLP, and NeuMF models for implicit-feedback recommendation."""
 
-from typing import Tuple
+from typing import Any, Mapping, Tuple
 
 import tensorflow as tf
 
@@ -12,7 +12,7 @@ class MatrixFactorization(tf.keras.Model):
         sigmoid( <p_u, q_i> + b_u + b_i )
 
     where p_u and q_i are learned embedding vectors and b_u, b_i are scalar
-    bias terms.  Output is passed through sigmoid so binary cross-entropy loss
+    bias terms. Output is passed through sigmoid so binary cross-entropy loss
     can be applied directly for implicit-feedback training.
 
     Args:
@@ -38,7 +38,11 @@ class MatrixFactorization(tf.keras.Model):
             n_items, 1, embeddings_initializer="zeros", name="item_bias"
         )
 
-    def call(self, inputs: Tuple[tf.Tensor, tf.Tensor], training: bool = False) -> tf.Tensor:
+    def call(
+        self,
+        inputs: Tuple[tf.Tensor, tf.Tensor],
+        training: bool = False,
+    ) -> tf.Tensor:
         """Compute sigmoid-normalised interaction scores for a batch.
 
         Args:
@@ -64,7 +68,7 @@ class MLP(tf.keras.Model):
 
     The user embedding p_u and item embedding q_i are concatenated into a single
     vector [p_u || q_i], which is then passed through a stack of dense→ReLU→dropout
-    layers.  A final linear projection maps to a scalar interaction score normalised
+    layers. A final linear projection maps to a scalar interaction score normalised
     by sigmoid.
 
     Args:
@@ -102,7 +106,11 @@ class MLP(tf.keras.Model):
             self.hidden_layers.append(tf.keras.layers.Dropout(dropout))
         self.output_layer = tf.keras.layers.Dense(1)
 
-    def call(self, inputs: Tuple[tf.Tensor, tf.Tensor], training: bool = False) -> tf.Tensor:
+    def call(
+        self,
+        inputs: Tuple[tf.Tensor, tf.Tensor],
+        training: bool = False,
+    ) -> tf.Tensor:
         """Compute sigmoid-normalised interaction scores for a batch.
 
         Args:
@@ -125,24 +133,24 @@ class MLP(tf.keras.Model):
 
 
 class NeuMF(tf.keras.Model):
-    """Neural Matrix Factorization: fused Generalised MF and MLP branches (He et al. 2017).
+    """Neural Matrix Factorization: fused GMF and MLP branches (He et al. 2017).
 
     GMF branch:
-        p_u_mf  ⊙  q_i_mf   →  element-wise product vector of shape (mf_dim,)
+        p_u_mf ⊙ q_i_mf → element-wise product vector of shape (mf_dim,)
 
     MLP branch:
-        [p_u_mlp || q_i_mlp]  →  Dense(64)→ReLU→Dense(32)→ReLU→Dense(16)→ReLU
+        [p_u_mlp || q_i_mlp] → configurable fully-connected tower
 
     Fusion:
-        [gmf_out || mlp_out]  →  Dense(1)  →  sigmoid
+        [gmf_out || mlp_out] → Dense(1) → sigmoid
 
     Separate embedding matrices per branch allow each path to learn a
     complementary representation: GMF captures bilinear interactions while
     MLP captures non-linear patterns.
 
     Args:
-        n_users: Total number of users.
-        n_items: Total number of items.
+        n_users: Total number of users in the dataset.
+        n_items: Total number of items in the dataset.
         mf_dim: Embedding dimension for the GMF branch.
         mlp_embed: Embedding dimension for the MLP branch (concatenated = 2×mlp_embed).
         layers: Hidden-layer widths for the MLP tower.
@@ -162,10 +170,30 @@ class NeuMF(tf.keras.Model):
         super().__init__(**kwargs)
         emb_init = tf.keras.initializers.RandomNormal(stddev=0.01)
 
-        self.mf_user = tf.keras.layers.Embedding(n_users, mf_dim, embeddings_initializer=emb_init, name="mf_user")
-        self.mf_item = tf.keras.layers.Embedding(n_items, mf_dim, embeddings_initializer=emb_init, name="mf_item")
-        self.mlp_user = tf.keras.layers.Embedding(n_users, mlp_embed, embeddings_initializer=emb_init, name="mlp_user")
-        self.mlp_item = tf.keras.layers.Embedding(n_items, mlp_embed, embeddings_initializer=emb_init, name="mlp_item")
+        self.mf_user = tf.keras.layers.Embedding(
+            n_users,
+            mf_dim,
+            embeddings_initializer=emb_init,
+            name="mf_user",
+        )
+        self.mf_item = tf.keras.layers.Embedding(
+            n_items,
+            mf_dim,
+            embeddings_initializer=emb_init,
+            name="mf_item",
+        )
+        self.mlp_user = tf.keras.layers.Embedding(
+            n_users,
+            mlp_embed,
+            embeddings_initializer=emb_init,
+            name="mlp_user",
+        )
+        self.mlp_item = tf.keras.layers.Embedding(
+            n_items,
+            mlp_embed,
+            embeddings_initializer=emb_init,
+            name="mlp_item",
+        )
 
         # Dense's default kernel_initializer is already Glorot/Xavier uniform, so —
         # unlike the PyTorch version — no output-layer init fix is needed here.
@@ -175,7 +203,11 @@ class NeuMF(tf.keras.Model):
             self.hidden_layers.append(tf.keras.layers.Dropout(dropout))
         self.output_layer = tf.keras.layers.Dense(1)
 
-    def call(self, inputs: Tuple[tf.Tensor, tf.Tensor], training: bool = False) -> tf.Tensor:
+    def call(
+        self,
+        inputs: Tuple[tf.Tensor, tf.Tensor],
+        training: bool = False,
+    ) -> tf.Tensor:
         """Compute fused GMF+MLP interaction scores for a batch.
 
         Args:
@@ -199,3 +231,55 @@ class NeuMF(tf.keras.Model):
 
         fused = tf.concat([gmf_out, x], axis=-1)
         return tf.sigmoid(tf.squeeze(self.output_layer(fused), axis=-1))
+
+
+def create_model(
+    model_name: str,
+    n_users: int,
+    n_items: int,
+    config: Mapping[str, Any],
+) -> tf.keras.Model:
+    """Construct one of the supported recommender architectures.
+
+    Args:
+        model_name: Model identifier: ``"MF"``, ``"MLP"``, or ``"NeuMF"``.
+        n_users: Total number of users in the dataset.
+        n_items: Total number of items in the dataset.
+        config: Model-specific architecture configuration.
+
+    Returns:
+        An unbuilt TensorFlow recommender model.
+
+    Raises:
+        ValueError: If ``model_name`` is not supported.
+    """
+    if model_name == "MF":
+        return MatrixFactorization(
+            n_users,
+            n_items,
+            embed_dim=config["embed_dim"],
+        )
+
+    if model_name == "MLP":
+        return MLP(
+            n_users,
+            n_items,
+            embed_dim=config["embed_dim"],
+            layers=config["layers"],
+            dropout=config["dropout"],
+        )
+
+    if model_name == "NeuMF":
+        return NeuMF(
+            n_users,
+            n_items,
+            mf_dim=config["mf_dim"],
+            mlp_embed=config["mlp_embed"],
+            layers=config["layers"],
+            dropout=config["dropout"],
+        )
+
+    raise ValueError(
+        f"Unsupported model '{model_name}'. "
+        "Expected one of: 'MF', 'MLP', 'NeuMF'."
+    )
