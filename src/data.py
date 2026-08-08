@@ -252,11 +252,13 @@ class TrainDataset:
             ((self.users, self.items), self.labels)
         )
         if shuffle:
+            shuffle_buffer_size = min(len(self.users), 10_000)
+
             ds = ds.shuffle(
-                buffer_size=len(self.users),
+                buffer_size=shuffle_buffer_size,
                 seed=self.seed,
                 reshuffle_each_iteration=True,
-            )
+                )
         ds = ds.batch(batch_size)
         ds = ds.prefetch(tf.data.AUTOTUNE)
         return ds
