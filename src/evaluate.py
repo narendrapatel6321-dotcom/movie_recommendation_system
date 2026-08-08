@@ -4,8 +4,7 @@ import logging
 from typing import Dict, List
 
 import numpy as np
-import torch
-from torch.utils.data import DataLoader, Dataset
+import tensorflow as tf
 
 logger = logging.getLogger(__name__)
 
@@ -19,58 +18,55 @@ class RankingEvaluator:
 
     Args:
         k: Cutoff rank for both HR@K and NDCG@K (default 10).
+        eval_batch_size: Number of users scored per forward pass.
     """
 
     def __init__(self, k: int = 10, eval_batch_size: int = 256) -> None:
         self.k: int = k
         self.eval_batch_size: int = eval_batch_size
 
-    def evaluate(
-        self,
-        model: torch.nn.Module,
-        eval_dataset: Dataset,
-        device: str,
-    ) -> Dict[str, float]:
+    def evaluate(self, model: tf.keras.Model, eval_dataset) -> Dict[str, float]:
         """Score every user in ``eval_dataset`` and aggregate HR@K and NDCG@K.
 
         Args:
-            model: A trained recommendation model with a ``forward(user, item)``
-                signature returning interaction probability tensors.
-            eval_dataset: An ``EvalDataset`` instance where the positive item
-                occupies index 0 among the candidate list.
-            device: Torch device string (``"cpu"``, ``"cuda"``, or ``"mps"``).
+            model: A trained recommendation model with a
+                ``call((user, item), training=False)`` signature returning
+                interaction probability tensors.
+            eval_dataset: An ``EvalDataset`` (TF version, from ``data.py``)
+                where the positive item occupies column 0 of ``candidates``.
 
         Returns:
             Dict with keys ``"hr@{k}"`` and ``"ndcg@{k}"`` mapping to floats.
         """
-        model.eval()
         hrs: List[float] = []
         ndcgs: List[float] = []
 
-        loader = DataLoader(eval_dataset, batch_size=self.eval_batch_size, shuffle=False)
+        ds = eval_dataset.as_tf_dataset(batch_size=self.eval_batch_size)
 
         try:
-            with torch.no_grad():
-                for user, items in loader:
-                    # user: (B,)   items: (B, C) where C = 1 + num_negatives,
-                    # positive item is always at column 0.
-                    batch_size, num_candidates = items.shape
+            for user, items in ds:
+                # user: (B,)   items: (B, C) where C = 1 + num_negatives,
+                # positive item is always at column 0.
+                batch_size = tf.shape(items)[0]
+                num_candidates = tf.shape(items)[1]
 
-                    user_flat = user.to(device).repeat_interleave(num_candidates)
-                    items_flat = items.reshape(-1).to(device)
+                user_flat = tf.repeat(user, num_candidates)
+                items_flat = tf.reshape(items, [-1])
 
-                    scores_flat = model(user_flat, items_flat)
-                    scores: np.ndarray = scores_flat.view(batch_size, num_candidates).cpu().numpy()
+                scores_flat = model((user_flat, items_flat), training=False)
+                scores: np.ndarray = tf.reshape(
+                    scores_flat, [batch_size, num_candidates]
+                ).numpy()
 
-                    # 0-indexed rank of the positive = count of candidates scoring higher.
-                    pos_scores = scores[:, 0:1]
-                    ranks: np.ndarray = (scores > pos_scores).sum(axis=1)
+                # 0-indexed rank of the positive = count of candidates scoring higher.
+                pos_scores = scores[:, 0:1]
+                ranks: np.ndarray = (scores > pos_scores).sum(axis=1)
 
-                    hits = (ranks < self.k).astype(np.float64)
-                    ndcg_vals = np.where(ranks < self.k, 1.0 / np.log2(ranks + 2), 0.0)
+                hits = (ranks < self.k).astype(np.float64)
+                ndcg_vals = np.where(ranks < self.k, 1.0 / np.log2(ranks + 2), 0.0)
 
-                    hrs.extend(hits.tolist())
-                    ndcgs.extend(ndcg_vals.tolist())
+                hrs.extend(hits.tolist())
+                ndcgs.extend(ndcg_vals.tolist())
         except Exception as exc:
             logger.error("Evaluation loop failed: %s", exc)
             raise
@@ -81,7 +77,6 @@ class RankingEvaluator:
         }
         logger.info("Evaluation complete — %s", metrics)
         return metrics
-
 
     @staticmethod
     def log_report(model_name: str, metrics: Dict[str, float]) -> None:
