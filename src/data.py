@@ -15,7 +15,7 @@ class MovieLensDataLoader:
     """Loads and partitions the MovieLens 1M rating dataset.
 
     Applies contiguous ID remapping so user and item indices are zero-based
-    integers suitable for embedding layers.  Uses a leave-one-out temporal
+    integers suitable for embedding layers. Uses a leave-one-out temporal
     split: the chronologically last interaction per user is held out as the
     test sample, the second-to-last as validation, and all earlier interactions
     form the training set.
@@ -209,7 +209,10 @@ class TrainDataset:
                         "User %d: exhausted %d attempts sampling negatives "
                         "(%d/%d found). Item catalogue may be too small/dense "
                         "relative to num_negatives.",
-                        u, max_attempts, sampled, self.num_negatives,
+                        u,
+                        max_attempts,
+                        sampled,
+                        self.num_negatives,
                     )
                     break
                 j = int(rng.integers(self.n_items))
@@ -229,7 +232,11 @@ class TrainDataset:
         """Return the total number of (user, item, label) triples."""
         return len(self.users)
 
-    def as_tf_dataset(self, batch_size: int = 1024, shuffle: bool = True) -> tf.data.Dataset:
+    def as_tf_dataset(
+        self,
+        batch_size: int = 1024,
+        shuffle: bool = True,
+    ) -> tf.data.Dataset:
         """Wrap the pre-generated arrays in a batched, shuffled ``tf.data.Dataset``.
 
         Args:
@@ -245,7 +252,11 @@ class TrainDataset:
             ((self.users, self.items), self.labels)
         )
         if shuffle:
-            ds = ds.shuffle(buffer_size=len(self.users), seed=self.seed, reshuffle_each_iteration=True)
+            ds = ds.shuffle(
+                buffer_size=len(self.users),
+                seed=self.seed,
+                reshuffle_each_iteration=True,
+            )
         ds = ds.batch(batch_size)
         ds = ds.prefetch(tf.data.AUTOTUNE)
         return ds
@@ -255,7 +266,7 @@ class EvalDataset:
     """Per-user evaluation set following the leave-one-out ranking protocol.
 
     Each sample contains one positive item (at index 0) followed by
-    ``num_negatives`` randomly drawn unobserved items.  Callers score all
+    ``num_negatives`` randomly drawn unobserved items. Callers score all
     candidates and report HR@K / NDCG@K.
 
     Args:
@@ -293,7 +304,10 @@ class EvalDataset:
                     logger.warning(
                         "User %d: exhausted %d attempts sampling eval negatives "
                         "(%d/%d found).",
-                        u, max_attempts, len(negs), num_negatives,
+                        u,
+                        max_attempts,
+                        len(negs),
+                        num_negatives,
                     )
                     break
                 j = int(rng.integers(n_items))
@@ -317,7 +331,7 @@ class EvalDataset:
         return len(self.users)
 
     def as_tf_dataset(self, batch_size: int = 256) -> tf.data.Dataset:
-        """Wrap the pre-generated arrays in a batched ``tf.data.Dataset``.
+        """Wrap the pre-generated arrays in a batched, shuffled ``tf.data.Dataset``.
 
         Args:
             batch_size: Number of users scored per forward pass.
@@ -331,3 +345,54 @@ class EvalDataset:
         ds = ds.batch(batch_size)
         ds = ds.prefetch(tf.data.AUTOTUNE)
         return ds
+
+
+def create_datasets(
+    data: Dict,
+    num_negatives: int = 4,
+    eval_negatives: int = 99,
+    seed: int = 42,
+) -> Tuple[TrainDataset, EvalDataset, EvalDataset]:
+    """Create training, validation, and test datasets from a loaded data manifest.
+
+    Args:
+        data: Data manifest returned by ``MovieLensDataLoader.load()``.
+        num_negatives: Number of negative samples per positive training
+            interaction.
+        eval_negatives: Number of negative candidates per validation/test
+            interaction.
+        seed: Seed used for training negative sampling. Evaluation datasets
+            use ``seed + 1`` to keep their negative samples decorrelated from
+            training negatives.
+
+    Returns:
+        Tuple of ``(train_dataset, val_dataset, test_dataset)``.
+    """
+    n_items = data["n_items"]
+    pos_items = data["user_pos_items"]
+
+    train_dataset = TrainDataset(
+        data["train"],
+        n_items,
+        pos_items,
+        num_negatives=num_negatives,
+        seed=seed,
+    )
+
+    val_dataset = EvalDataset(
+        data["val"],
+        pos_items,
+        n_items,
+        num_negatives=eval_negatives,
+        seed=seed + 1,
+    )
+
+    test_dataset = EvalDataset(
+        data["test"],
+        pos_items,
+        n_items,
+        num_negatives=eval_negatives,
+        seed=seed + 1,
+    )
+
+    return train_dataset, val_dataset, test_dataset
