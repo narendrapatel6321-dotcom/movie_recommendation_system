@@ -7,30 +7,33 @@ from typing import Dict, List
 
 import matplotlib.pyplot as plt
 import numpy as np
-import torch
+import tensorflow as tf
 
 logger = logging.getLogger(__name__)
 
 
 def set_seed(seed: int = 42) -> None:
-    """Set random seeds for Python, NumPy, and PyTorch for reproducible runs.
+    """Set random seeds for Python, NumPy, and TensorFlow for reproducible runs.
 
     Args:
         seed: Integer seed value to propagate to all RNG backends.
     """
     random.seed(seed)
     np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+    tf.random.set_seed(seed)
     logger.debug("Global seed set to %d", seed)
 
 
-def save_model(model: torch.nn.Module, name: str, save_dir: str = "results") -> None:
-    """Persist a model's state dict to disk as a ``.pt`` checkpoint file.
+def save_model(model: tf.keras.Model, name: str, save_dir: str = "results") -> None:
+    """Persist a model's weights to disk as a Keras ``.weights.h5`` checkpoint.
+
+    Uses ``save_weights`` (not the full ``model.save``) since these models
+    are subclassed rather than functional/Sequential — weights-only
+    checkpoints avoid needing a registered ``get_config``/``from_config``
+    for full-model serialisation.
 
     Args:
-        model: The trained ``nn.Module`` whose weights should be saved.
+        model: The trained ``tf.keras.Model`` whose weights should be saved.
         name: Base filename (without extension) for the checkpoint.
         save_dir: Directory in which to write the file (created if absent).
 
@@ -39,12 +42,42 @@ def save_model(model: torch.nn.Module, name: str, save_dir: str = "results") -> 
     """
     try:
         os.makedirs(save_dir, exist_ok=True)
-        path = os.path.join(save_dir, f"{name}.pt")
-        torch.save(model.state_dict(), path)
+        path = os.path.join(save_dir, f"{name}.weights.h5")
+        model.save_weights(path)
         logger.info("Model checkpoint saved to '%s'", path)
     except OSError as exc:
         logger.error("Failed to save model '%s': %s", name, exc)
         raise
+
+
+def load_model_weights(model: tf.keras.Model, name: str, save_dir: str = "results") -> tf.keras.Model:
+    """Load a previously saved checkpoint's weights into ``model`` in place.
+
+    The model must already be built (e.g. by calling it once on a sample
+    batch, or via ``model.build(...)``) with the same architecture used to
+    produce the checkpoint, since ``save_weights``/``load_weights`` match
+    parameters by layer structure rather than storing the architecture itself.
+
+    Args:
+        model: A ``tf.keras.Model`` instance with the same architecture as
+            the one the checkpoint was saved from.
+        name: Base filename (without extension) the checkpoint was saved under.
+        save_dir: Directory the checkpoint file lives in.
+
+    Returns:
+        The same ``model`` instance, with weights loaded in place.
+
+    Raises:
+        OSError: If the checkpoint file cannot be found or read.
+    """
+    path = os.path.join(save_dir, f"{name}.weights.h5")
+    try:
+        model.load_weights(path)
+        logger.info("Model checkpoint loaded from '%s'", path)
+    except OSError as exc:
+        logger.error("Failed to load model '%s': %s", name, exc)
+        raise
+    return model
 
 
 def plot_training_history(
