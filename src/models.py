@@ -38,17 +38,19 @@ class MatrixFactorization(tf.keras.Model):
             n_items, 1, embeddings_initializer="zeros", name="item_bias"
         )
 
-    def call(self, user: tf.Tensor, item: tf.Tensor, training: bool = False) -> tf.Tensor:
+    def call(self, inputs: Tuple[tf.Tensor, tf.Tensor], training: bool = False) -> tf.Tensor:
         """Compute sigmoid-normalised interaction scores for a batch.
 
         Args:
-            user: Int tensor of user indices, shape (B,).
-            item: Int tensor of item indices, shape (B,).
+            inputs: Tuple of (user, item) int tensors, each shape (B,). This
+                tuple form is required so `model.fit()` can call the model
+                directly on batches yielded as `((user, item), label)`.
             training: Unused (no training-only ops in this model); kept for API parity.
 
         Returns:
             Float tensor of predicted interaction probabilities, shape (B,).
         """
+        user, item = inputs
         pu = self.user_emb(user)
         qi = self.item_emb(item)
         bu = tf.squeeze(self.user_bias(user), axis=-1)
@@ -100,17 +102,19 @@ class MLP(tf.keras.Model):
             self.hidden_layers.append(tf.keras.layers.Dropout(dropout))
         self.output_layer = tf.keras.layers.Dense(1)
 
-    def call(self, user: tf.Tensor, item: tf.Tensor, training: bool = False) -> tf.Tensor:
+    def call(self, inputs: Tuple[tf.Tensor, tf.Tensor], training: bool = False) -> tf.Tensor:
         """Compute sigmoid-normalised interaction scores for a batch.
 
         Args:
-            user: Int tensor of user indices, shape (B,).
-            item: Int tensor of item indices, shape (B,).
+            inputs: Tuple of (user, item) int tensors, each shape (B,). This
+                tuple form is required so `model.fit()` can call the model
+                directly on batches yielded as `((user, item), label)`.
             training: Whether dropout should be active.
 
         Returns:
             Float tensor of predicted interaction probabilities, shape (B,).
         """
+        user, item = inputs
         x = tf.concat([self.user_emb(user), self.item_emb(item)], axis=-1)
         for layer in self.hidden_layers:
             if isinstance(layer, tf.keras.layers.Dropout):
@@ -171,17 +175,19 @@ class NeuMF(tf.keras.Model):
             self.hidden_layers.append(tf.keras.layers.Dropout(dropout))
         self.output_layer = tf.keras.layers.Dense(1)
 
-    def call(self, user: tf.Tensor, item: tf.Tensor, training: bool = False) -> tf.Tensor:
+    def call(self, inputs: Tuple[tf.Tensor, tf.Tensor], training: bool = False) -> tf.Tensor:
         """Compute fused GMF+MLP interaction scores for a batch.
 
         Args:
-            user: Int tensor of user indices, shape (B,).
-            item: Int tensor of item indices, shape (B,).
+            inputs: Tuple of (user, item) int tensors, each shape (B,). This
+                tuple form is required so `model.fit()` can call the model
+                directly on batches yielded as `((user, item), label)`.
             training: Whether dropout should be active.
 
         Returns:
             Float tensor of predicted interaction probabilities, shape (B,).
         """
+        user, item = inputs
         gmf_out = self.mf_user(user) * self.mf_item(item)
 
         x = tf.concat([self.mlp_user(user), self.mlp_item(item)], axis=-1)
