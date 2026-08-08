@@ -79,50 +79,61 @@ def load_model_weights(model: tf.keras.Model, name: str, save_dir: str = "result
         raise
     return model
 
-
 def plot_training_history(
     histories: Dict[str, Dict[str, List[float]]],
     save_dir: str = "results",
 ) -> None:
-    """Plot BCE training loss and validation HR@10/NDCG@10 curves for all models.
+    """Plot training loss and validation ranking metrics for one or more models.
+
+    The figure is saved to ``save_dir/training_history.png`` and displayed
+    inline when called from a notebook.
 
     Args:
-        histories: Mapping of model name → history dict with keys
-            ``"train_loss"``, ``"val_hr"``, and ``"val_ndcg"``.
-        save_dir: Output directory for the PNG file.
-
-    Raises:
-        OSError: If the plot file cannot be written.
+        histories: Mapping from model name to history dictionary. Each history
+            may contain ``train_loss``, ``val_hr``, and ``val_ndcg``.
+        save_dir: Directory where the plot image will be saved.
     """
-    os.makedirs(save_dir, exist_ok=True)
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-
     try:
-        for name, h in histories.items():
-            axes[0].plot(h.get("train_loss", []), label=name)
-            axes[1].plot(h.get("val_hr", []), label=name)
-            axes[2].plot(h.get("val_ndcg", []), label=name)
+        import matplotlib.pyplot as plt
 
-        configs = [
-            ("Training BCE Loss", "Epoch", "Loss"),
-            ("Val Hit Rate@10", "Epoch", "HR@10"),
-            ("Val NDCG@10", "Epoch", "NDCG@10"),
-        ]
-        for ax, (title, xlabel, ylabel) in zip(axes, configs):
-            ax.set_title(title)
-            ax.set_xlabel(xlabel)
-            ax.set_ylabel(ylabel)
+        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+        for name, history in histories.items():
+            axes[0].plot(
+                history.get("train_loss", []),
+                label=name,
+            )
+            axes[1].plot(
+                history.get("val_hr", []),
+                label=name,
+            )
+            axes[2].plot(
+                history.get("val_ndcg", []),
+                label=name,
+            )
+
+        axes[0].set_title("Training Loss")
+        axes[1].set_title("Validation HR@K")
+        axes[2].set_title("Validation NDCG@K")
+
+        for ax in axes:
+            ax.set_xlabel("Epoch")
             ax.legend()
+            ax.grid(True, alpha=0.3)
 
-        plt.tight_layout()
+        fig.tight_layout()
+
+        os.makedirs(save_dir, exist_ok=True)
         path = os.path.join(save_dir, "training_history.png")
-        plt.savefig(path, dpi=150)
-        logger.info("Training history plot saved to '%s'", path)
+        fig.savefig(path, dpi=150, bbox_inches="tight")
+
+        plt.show()
+        plt.close(fig)
+
+        logger.info("Training history plot saved to %s", path)
+
     except Exception as exc:
         logger.error("Failed to write training history plot: %s", exc)
-        raise
-    finally:
-        plt.close(fig)
 
 
 def plot_comparison_bar(
