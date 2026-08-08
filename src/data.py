@@ -237,9 +237,13 @@ class TrainDataset:
             shuffle: Whether to shuffle each epoch (buffer covers the full dataset).
 
         Returns:
-            A ``tf.data.Dataset`` yielding ``(user, item, label)`` batches.
+            A ``tf.data.Dataset`` yielding ``((user, item), label)`` batches —
+            the ``(x, y)`` shape ``model.fit()`` expects, where ``x`` is passed
+            straight through to the model's ``call(inputs, training)``.
         """
-        ds = tf.data.Dataset.from_tensor_slices((self.users, self.items, self.labels))
+        ds = tf.data.Dataset.from_tensor_slices(
+            ((self.users, self.items), self.labels)
+        )
         if shuffle:
             ds = ds.shuffle(buffer_size=len(self.users), seed=self.seed, reshuffle_each_iteration=True)
         ds = ds.batch(batch_size)
