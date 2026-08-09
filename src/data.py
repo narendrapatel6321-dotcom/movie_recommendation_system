@@ -216,7 +216,7 @@ class TrainDataset:
                     )
                     break
                 j = int(rng.integers(self.n_items))
-                if j not in pos_set:
+                if j not in pos_set and j not in negs:
                     users.append(u)
                     items.append(j)
                     labels.append(0.0)
